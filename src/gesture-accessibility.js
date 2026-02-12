@@ -6,7 +6,7 @@
 
   // Site Configuration (Defaults)
   let siteConfig = {
-    cursor_mode_enabled: true,
+    cursor_mode_enabled: false,
     profile: "default",
     cursor_speed: 12,
     scroll_speed: 15,
