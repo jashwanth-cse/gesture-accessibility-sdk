@@ -4,6 +4,11 @@
   let lastGesture = null;
   let lastSentTime = 0;
 
+  // SDK State Flags
+  let sdkInitialized = false;
+  let cameraActive = false;
+  let consentModalActive = false;
+
   // Site Configuration (Defaults)
   let siteConfig = {
     cursor_mode_enabled: false,
@@ -20,16 +25,313 @@
   let lastGestureState = null;
   let clickCooldown = 0;
   let lastCursorActivity = 0; // Track last interaction for inactivity timeout
+  let lastScrollTime = 0; // Scroll throttling
   const INACTIVITY_TIMEOUT = 30000; // 30 seconds
+  const SCROLL_THROTTLE_MS = 50; // Minimum time between scroll calls (20 scrolls/sec max)
 
   // Scroll fallback state
   let lastHandY = null;
   const SCROLL_THRESHOLD = 0.03;
   const SCROLL_FACTOR = 500;
 
+  /* ================= PERMISSION MANAGER ================= */
+
+  const PermissionManager = {
+    STORAGE_KEY: 'gesture_accessibility_enabled',
+    BLOCKED_KEY: 'gesture_accessibility_blocked',
+    DISMISSED_KEY: 'gesture_accessibility_dismissed',
+
+    checkStoredPreference() {
+      try {
+        return localStorage.getItem(this.STORAGE_KEY) === 'true';
+      } catch (e) {
+        log('localStorage unavailable', e);
+        return false;
+      }
+    },
+
+    savePreference(enabled) {
+      try {
+        localStorage.setItem(this.STORAGE_KEY, String(enabled));
+      } catch (e) {
+        log('Failed to save preference', e);
+      }
+    },
+
+    isPermissionBlocked() {
+      try {
+        return localStorage.getItem(this.BLOCKED_KEY) === 'true';
+      } catch (e) {
+        return false;
+      }
+    },
+
+    markPermissionBlocked() {
+      try {
+        localStorage.setItem(this.BLOCKED_KEY, 'true');
+      } catch (e) {
+        log('Failed to mark permission blocked', e);
+      }
+    },
+
+    isSessionDismissed() {
+      try {
+        return sessionStorage.getItem(this.DISMISSED_KEY) === 'true';
+      } catch (e) {
+        return false;
+      }
+    },
+
+    markSessionDismissed() {
+      try {
+        sessionStorage.setItem(this.DISMISSED_KEY, 'true');
+      } catch (e) {
+        log('Failed to mark session dismissed', e);
+      }
+    }
+  };
+
+  /* ================= CONSENT MODAL ================= */
+
+  let consentModalElement = null;
+  let autoCloseTimer = null;
+
+  function createConsentModal() {
+    const toast = document.createElement('div');
+    toast.id = 'gesture-accessibility-consent-toast';
+    toast.setAttribute('role', 'dialog');
+    toast.setAttribute('aria-labelledby', 'ga-toast-title');
+    toast.setAttribute('aria-modal', 'true');
+
+    toast.innerHTML = `
+      <div class="ga-toast-content">
+        <div id="ga-toast-title" class="ga-toast-title">ENABLE GESTURE CONTROL?</div>
+        <div class="ga-toast-actions">
+          <button id="ga-enable-btn" class="ga-toast-btn ga-toast-btn-yes">YES</button>
+          <button id="ga-cancel-btn" class="ga-toast-btn ga-toast-btn-no">NO</button>
+        </div>
+      </div>
+    `;
+
+    // Inject styles
+    const style = document.createElement('style');
+    style.textContent = `
+      #gesture-accessibility-consent-toast {
+        position: fixed;
+        bottom: 30px;
+        right: 30px;
+        z-index: 999998;
+        font-family: 'Courier New', Courier, monospace;
+        animation: ga-toast-slide-in 0.3s ease-out;
+      }
+      @keyframes ga-toast-slide-in {
+        from {
+          opacity: 0;
+          transform: translateX(100px);
+        }
+        to {
+          opacity: 1;
+          transform: translateX(0);
+        }
+      }
+      .ga-toast-content {
+        background: rgba(0, 0, 0, 0.9) !important;
+        border: 2px solid rgba(255, 255, 255, 0.3) !important;
+        border-radius: 4px !important;
+        padding: 20px 24px !important;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5) !important;
+        min-width: 280px !important;
+        max-width: 320px !important;
+        margin: 0 !important;
+        display: block !important;
+      }
+      .ga-toast-title {
+        color: #ffffff !important;
+        font-size: 14px !important;
+        font-weight: bold !important;
+        letter-spacing: 1px !important;
+        margin: 0 0 16px 0 !important;
+        padding: 0 !important;
+        text-align: center !important;
+        text-transform: uppercase !important;
+        line-height: 1.4 !important;
+        display: block !important;
+      }
+      .ga-toast-actions {
+        display: flex !important;
+        gap: 12px !important;
+        justify-content: center !important;
+        margin: 0 !important;
+        padding: 0 !important;
+      }
+      .ga-toast-btn {
+        background: transparent !important;
+        border: 2px solid rgba(255, 255, 255, 0.4) !important;
+        color: #ffffff !important;
+        padding: 8px 24px !important;
+        margin: 0 !important;
+        font-family: 'Courier New', Courier, monospace !important;
+        font-size: 13px !important;
+        font-weight: bold !important;
+        letter-spacing: 1px !important;
+        cursor: pointer !important;
+        transition: all 0.15s ease !important;
+        border-radius: 2px !important;
+        text-transform: uppercase !important;
+        line-height: normal !important;
+        display: inline-block !important;
+        width: auto !important;
+        height: auto !important;
+        min-width: 80px !important;
+        box-sizing: border-box !important;
+      }
+      .ga-toast-btn:hover {
+        background: rgba(255, 255, 255, 0.1) !important;
+        border-color: rgba(255, 255, 255, 0.8) !important;
+      }
+      .ga-toast-btn-yes:hover {
+        background: rgba(0, 255, 0, 0.15) !important;
+        border-color: #00ff00 !important;
+        color: #00ff00 !important;
+      }
+      .ga-toast-btn-no:hover {
+        background: rgba(255, 0, 0, 0.15) !important;
+        border-color: #ff0000 !important;
+        color: #ff0000 !important;
+      }
+      @media (max-width: 480px) {
+        #gesture-accessibility-consent-toast {
+          bottom: 20px;
+          right: 20px;
+          left: 20px;
+        }
+        .ga-toast-content {
+          min-width: auto;
+          padding: 16px 20px;
+        }
+        .ga-toast-title {
+          font-size: 12px;
+        }
+        .ga-toast-btn {
+          font-size: 12px;
+          padding: 8px 20px;
+        }
+      }
+    `; // Inject styles - handle edge case where head doesn't exist yet
+    const injectStyle = () => {
+      const targetElement = document.head || document.getElementsByTagName('head')[0] || document.documentElement;
+      if (targetElement) {
+        targetElement.appendChild(style);
+      } else {
+        // Fallback: wait for DOM
+        setTimeout(injectStyle, 10);
+      }
+    };
+    injectStyle();
+
+    return toast;
+  }
+
+  function showConsentModal() {
+    if (consentModalActive) return;
+    consentModalActive = true;
+
+    consentModalElement = createConsentModal();
+    document.body.appendChild(consentModalElement);
+
+    // Event handlers
+    const enableBtn = document.getElementById('ga-enable-btn');
+    const cancelBtn = document.getElementById('ga-cancel-btn');
+
+    enableBtn.addEventListener('click', handleEnableClick);
+    cancelBtn.addEventListener('click', handleCancelClick);
+
+    // Auto-close after 15 seconds
+    autoCloseTimer = setTimeout(() => {
+      log('Consent modal auto-closed after 15 seconds');
+      removeConsentModal();
+    }, 15000);
+  }
+
+  function handleEnableClick() {
+    clearTimeout(autoCloseTimer);
+    PermissionManager.savePreference(true);
+    removeConsentModal();
+    GestureAccessibility.start();
+  }
+
+  function handleCancelClick() {
+    clearTimeout(autoCloseTimer);
+    PermissionManager.markSessionDismissed();
+    removeConsentModal();
+  }
+
+  function removeConsentModal() {
+    if (consentModalElement) {
+      consentModalElement.remove();
+      consentModalElement = null;
+    }
+    consentModalActive = false;
+    clearTimeout(autoCloseTimer);
+  }
+
+  /* ================= INITIALIZATION FLOW ================= */
+
+  function initializeConsentFlow() {
+    // Check if user already enabled
+    if (PermissionManager.checkStoredPreference()) {
+      log('Auto-starting: User previously enabled');
+      GestureAccessibility.start();
+      return;
+    }
+
+    // Check if permission was previously blocked
+    if (PermissionManager.isPermissionBlocked()) {
+      log('Camera permission blocked. Feature disabled.');
+      return;
+    }
+
+    // Check if dismissed this session
+    if (PermissionManager.isSessionDismissed()) {
+      log('Consent dismissed this session');
+      return;
+    }
+
+    // Show consent modal
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', showConsentModal);
+    } else {
+      showConsentModal();
+    }
+  }
+
+  /* ================= DEVICE DETECTION ================= */
+
+  function isMobileOrTablet() {
+    // Check user agent for mobile/tablet indicators
+    const userAgent = navigator.userAgent || navigator.vendor || window.opera;
+
+    // Mobile regex pattern (covers iOS, Android, Windows Phone, etc.)
+    const mobileRegex = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile|mobile|CriOS/i;
+
+    // Touch-only devices (tablets without mouse)
+    const isTouchOnly = ('ontouchstart' in window || navigator.maxTouchPoints > 0) &&
+      !window.matchMedia('(pointer: fine)').matches;
+
+    // Small screen check (most tablets are > 768px, but still good to check)
+    const isSmallScreen = window.innerWidth < 1024;
+
+    return mobileRegex.test(userAgent) || (isTouchOnly && isSmallScreen);
+  }
+
   /* ================= INIT ================= */
 
   GestureAccessibility.init = function (options) {
+    if (sdkInitialized) {
+      log('SDK already initialized');
+      return;
+    }
+
     config = {
       apiUrl: options.apiUrl,
       siteId: options.siteId,
@@ -38,19 +340,49 @@
       cooldown: 800
     };
 
+    // Early exit for mobile/tablet devices
+    if (isMobileOrTablet()) {
+      if (config.debug) {
+        console.log('[GestureAccessibility] Mobile/tablet detected. Gesture control not supported on this device.');
+      }
+      return;
+    }
+
+    sdkInitialized = true;
+
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       log("Camera not supported");
       return;
     }
 
-    if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", loadMediaPipe);
-    } else {
-      loadMediaPipe();
-    }
-
     // Fetch config asynchronously (non-blocking)
     fetchSiteConfig(config.apiUrl, config.siteId, config.apiKey);
+
+    // Initialize consent flow
+    initializeConsentFlow();
+  };
+
+  /* ================= START (NEW PUBLIC METHOD) ================= */
+
+  GestureAccessibility.start = async function () {
+    if (cameraActive) {
+      log('Camera already active');
+      return;
+    }
+
+    if (!sdkInitialized) {
+      log('SDK not initialized. Call init() first.');
+      return;
+    }
+
+    try {
+      await loadMediaPipe();
+      cameraActive = true;
+      log('Gesture Accessibility started');
+    } catch (e) {
+      console.error('Failed to start Gesture Accessibility', e);
+      PermissionManager.markPermissionBlocked();
+    }
   };
 
   async function fetchSiteConfig(apiUrl, siteId, apiKey) {
@@ -151,6 +483,7 @@
       startCamera();
     } catch (e) {
       console.error("Failed to load MediaPipe", e);
+      throw e;
     }
   }
 
@@ -161,10 +494,22 @@
     video.style.display = "none";
     document.body.appendChild(video);
 
-    navigator.mediaDevices.getUserMedia({ video: true }).then(stream => {
-      video.srcObject = stream;
-      video.play();
-    });
+    navigator.mediaDevices.getUserMedia({ video: true })
+      .then(stream => {
+        video.srcObject = stream;
+        video.play();
+      })
+      .catch(error => {
+        log("Camera access denied:", error);
+        PermissionManager.markPermissionBlocked();
+
+        if (config.debug) {
+          console.warn('[GestureAccessibility] Camera permission denied. Feature disabled.');
+        }
+
+        cameraActive = false;
+        return;
+      });
 
     const hands = new Hands({
       locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
@@ -263,16 +608,28 @@
         return;
       }
 
-      // 3. Scroll Check (Prevents Drift)
+      // 3. Scroll Check (Prevents Drift) - WITH THROTTLING
       const SCROLL_SPEED = siteConfig.scroll_speed;
-      if (isTwoFingers) {
+
+      // Throttle scroll calls to prevent lag (max 20 scrolls/sec)
+      const canScroll = (now - lastScrollTime) > SCROLL_THROTTLE_MS;
+
+      if (isTwoFingers && canScroll) {
         lastCursorActivity = now; // Update activity timestamp
-        window.scrollBy({ top: -SCROLL_SPEED, behavior: "auto" }); // Scroll Up
+        lastScrollTime = now; // Update scroll throttle
+        window.scrollBy({ top: -SCROLL_SPEED, behavior: "smooth" }); // Scroll Up (smooth!)
         return;
       }
-      if (isRockGesture) {
+      if (isRockGesture && canScroll) {
         lastCursorActivity = now; // Update activity timestamp
-        window.scrollBy({ top: SCROLL_SPEED, behavior: "auto" }); // Scroll Down
+        lastScrollTime = now; // Update scroll throttle
+        window.scrollBy({ top: SCROLL_SPEED, behavior: "smooth" }); // Scroll Down (smooth!)
+        return;
+      }
+
+      // If gesture detected but throttled, still return to prevent cursor drift
+      if (isTwoFingers || isRockGesture) {
+        lastCursorActivity = now; // Keep activity alive
         return;
       }
 
@@ -360,21 +717,50 @@
     if (cursorElement) return;
     cursorElement = document.createElement("div");
     cursorElement.id = "gesture-cursor";
+
+    // Create inner crosshair element
+    const crosshair = document.createElement("div");
+    crosshair.className = "gesture-cursor-crosshair";
+    cursorElement.appendChild(crosshair);
+
+    // Gaming-style cursor with neon green glow
     Object.assign(cursorElement.style, {
       position: "fixed",
-      width: "24px",
-      height: "24px",
+      width: "40px",
+      height: "40px",
       borderRadius: "50%",
-      background: "linear-gradient(135deg, rgba(102, 126, 234, 0.8) 0%, rgba(118, 75, 162, 0.8) 100%)",
-      backdropFilter: "blur(8px)",
-      border: "2px solid rgba(255, 255, 255, 0.6)",
-      boxShadow: "0 4px 12px rgba(102, 126, 234, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.2)",
+      background: "rgba(0, 0, 0, 0.8)",
+      border: "3px solid #00ff00",
+      boxShadow: "0 0 20px rgba(0, 255, 0, 0.6), 0 0 40px rgba(0, 255, 0, 0.3), inset 0 0 10px rgba(0, 255, 0, 0.2)",
       pointerEvents: "none",
       zIndex: "999999",
       display: "none",
       transform: "translate(-50%, -50%)",
-      transition: "all 0.1s ease-out"
+      transition: "all 0.05s ease-out"
     });
+
+    // Crosshair styling (targeting reticle)
+    Object.assign(crosshair.style, {
+      position: "absolute",
+      top: "50%",
+      left: "50%",
+      width: "20px",
+      height: "20px",
+      transform: "translate(-50%, -50%)",
+      pointerEvents: "none"
+    });
+
+    // Create crosshair lines using pseudo-elements via innerHTML
+    crosshair.innerHTML = `
+      <svg width="20" height="20" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+        <line x1="10" y1="0" x2="10" y2="6" stroke="#00ff00" stroke-width="2"/>
+        <line x1="10" y1="14" x2="10" y2="20" stroke="#00ff00" stroke-width="2"/>
+        <line x1="0" y1="10" x2="6" y2="10" stroke="#00ff00" stroke-width="2"/>
+        <line x1="14" y1="10" x2="20" y2="10" stroke="#00ff00" stroke-width="2"/>
+        <circle cx="10" cy="10" r="2" fill="none" stroke="#00ff00" stroke-width="1"/>
+      </svg>
+    `;
+
     document.body.appendChild(cursorElement);
   }
 

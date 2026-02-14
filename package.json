@@ -1,6 +1,6 @@
 {
   "name": "gesture-accessibility-sdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "scripts": {
     "build": "cpy src/gesture-accessibility.js dist/gesture-accessibility.min.js"
   },
