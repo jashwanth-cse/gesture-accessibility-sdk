@@ -2,9 +2,10 @@
   "name": "gesture-accessibility-sdk",
   "version": "0.3.0",
   "scripts": {
-    "build": "cpy src/gesture-accessibility.js dist/gesture-accessibility.min.js"
+    "build": "uglifyjs src/gesture-accessibility.js -o dist/gesture-accessibility.min.js -c -m"
   },
   "devDependencies": {
-    "cpy-cli": "^7.0.0"
+    "cpy-cli": "^7.0.0",
+    "uglify-js": "^3.17.4"
   }
 }
